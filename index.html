@@ -4076,6 +4076,7 @@
 
             // Load persistent saved layout if available
             loadSavedLayout();
+            if (typeof startCloudSync === 'function') { startCloudSync(); }
 
             window.addEventListener('resize', onWindowResize);
             setupUI();
@@ -4712,11 +4713,12 @@
             }
         }
 
-        // Initialize Cloud Listeners when loaded
-        setTimeout(() => {
+        // Start Cloud Sync after the 3D model has fully loaded
+        function startCloudSync() {
+            console.log("3D Scene Loaded. Starting WebSocket real-time sync...");
             fetchCloudLayoutOnStartup();
             initRealtimeWS();
-        }, 500);
+        }
 
     </script>
 </body>
