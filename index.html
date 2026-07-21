@@ -355,7 +355,7 @@
             <span style="cursor: pointer; padding: 2px 6px; background: rgba(255,255,255,0.1); border-radius: 4px;" onclick="document.getElementById('debug-console').style.display='none'">[x] ปิด</span>
         </div>
         <div id="debug-topic" style="margin-bottom: 4px;">Topic: -</div>
-        <div id="debug-sse" style="margin-bottom: 4px; font-weight: bold;">SSE: Connecting...</div>
+        <div id="debug-sse" style="margin-bottom: 4px; font-weight: bold;">Status: -</div>
         <div id="debug-sent" style="margin-bottom: 4px;">Last Sent: -</div>
         <div id="debug-recv" style="margin-bottom: 4px;">Last Recv: -</div>
         <div id="debug-err" style="color: #f87171; margin-top: 6px; max-height: 80px; overflow-y: auto; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 4px; white-space: pre-wrap;">Errors: None</div>
@@ -4471,7 +4471,7 @@
     <script>
 
         // ==========================================
-        // REAL-TIME CLOUD & MULTI-DEVICE SYNC ENGINE (ntfy.sh)
+        // REAL-TIME CLOUD & MULTI-DEVICE SYNC ENGINE (WebSocket)
         // ==========================================
 
         const urlParams = new URLSearchParams(window.location.search);
@@ -4530,76 +4530,54 @@
                 });
         }
 
-        let sseSource = null;
-        let pollingTimer = null;
-        let isUsingPolling = false;
+        let ws = null;
+        let wsReconnectTimeout = null;
 
-        function startPollingFallback() {
-            if (isUsingPolling) return;
-            isUsingPolling = true;
-            updateDebugStatus('sse', '⚠️ Polling Fallback Active');
-            
-            pollingTimer = setInterval(() => {
-                if (!isUserDragging) {
-                    fetch('https://ntfy.sh/' + ntfyTopic + '/json?poll=1')
-                        .then(res => res.text())
-                        .then(text => {
-                            if (!text || text.trim() === '') return;
-                            const lines = text.trim().split('\n');
-                            if (lines.length > 0) {
-                                const lastLine = lines[lines.length - 1];
-                                try {
-                                    const parsed = JSON.parse(lastLine);
-                                    if (parsed.message) {
-                                        const payload = JSON.parse(parsed.message);
-                                        applyRemoteLayoutData(payload);
-                                        updateDebugStatus('recv', 'Poll: ' + new Date(parsed.time * 1000).toLocaleTimeString());
-                                    }
-                                } catch(e) {}
-                            }
-                        }).catch(err => {
-                            console.error("Polling error:", err);
-                            updateDebugStatus('error', 'Polling: ' + err.message);
-                        });
-                }
-            }, 3000);
-        }
+        function initRealtimeWS() {
+            if (ws) {
+                try { ws.close(); } catch(e) {}
+            }
 
-        function initRealtimeStream() {
+            updateDebugStatus('topic', ntfyTopic);
+            updateDebugStatus('sse', '🔌 Connecting to Cloud...');
+
             try {
-                updateDebugStatus('topic', ntfyTopic);
-                sseSource = new EventSource('https://ntfy.sh/' + ntfyTopic + '/sse');
-                
-                sseSource.onopen = () => {
-                    updateDebugStatus('sse', '🟢 Connected (SSE)');
-                    if (pollingTimer) {
-                        clearInterval(pollingTimer);
-                        isUsingPolling = false;
+                const wsUrl = 'wss://ntfy.sh/' + ntfyTopic + '/ws';
+                ws = new WebSocket(wsUrl);
+
+                ws.onopen = () => {
+                    updateDebugStatus('sse', '🟢 Connected (WS)');
+                    if (wsReconnectTimeout) {
+                        clearTimeout(wsReconnectTimeout);
                     }
                 };
 
-                sseSource.onmessage = (event) => {
+                ws.onmessage = (event) => {
                     try {
                         const data = JSON.parse(event.data);
-                        if (data.message && !isUserDragging) {
+                        if (data.event === 'message' && data.message && !isUserDragging) {
                             const payload = JSON.parse(data.message);
                             applyRemoteLayoutData(payload);
                             updateDebugStatus('recv', new Date(data.time * 1000).toLocaleTimeString());
                         }
                     } catch(e) {
-                        updateDebugStatus('error', 'SSE Parse: ' + e.message);
+                        updateDebugStatus('error', 'WS Parse: ' + e.message);
                     }
                 };
 
-                sseSource.onerror = (e) => {
-                    console.warn("SSE connection failed. Falling back to HTTP polling...", e);
-                    updateDebugStatus('sse', '🔴 Disconnected (Using Polling)');
-                    startPollingFallback();
+                ws.onclose = (e) => {
+                    updateDebugStatus('sse', '🔴 Disconnected. Retrying...');
+                    console.log('WS closed, reconnecting in 3s...', e);
+                    wsReconnectTimeout = setTimeout(initRealtimeWS, 3000);
                 };
+
+                ws.onerror = (err) => {
+                    updateDebugStatus('error', 'WS Error: ' + err.message);
+                };
+
             } catch(e) {
-                console.error("SSE init error, falling back...", e);
-                updateDebugStatus('error', 'SSE Init: ' + e.message);
-                startPollingFallback();
+                updateDebugStatus('error', 'WS Init: ' + e.message);
+                wsReconnectTimeout = setTimeout(initRealtimeWS, 3000);
             }
         }
 
@@ -4737,7 +4715,7 @@
         // Initialize Cloud Listeners when loaded
         setTimeout(() => {
             fetchCloudLayoutOnStartup();
-            initRealtimeStream();
+            initRealtimeWS();
         }, 500);
 
     </script>
