@@ -317,11 +317,6 @@
         }
 
     </style>
-
-    <!-- Firebase Realtime Database SDK (Compat version for single HTML) -->
-    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
-
 </head>
 <body>
 
@@ -340,13 +335,32 @@
         <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
             <div class="realtime-badge">
                 <span class="pulse-dot"></span>
-                <span id="sync-status-text">🟢 ออนไลน์เรียลไทม์ (Real-time Active)</span>
+                <span id="sync-status-text">🟢 ออนไลน์เรียลไทม์ (Cloud Synced)</span>
             </div>
-            <button class="room-share-btn" onclick="copyRoomShareLink()">
-                🔗 คัดลอกลิงก์แชร์ทีม (<span id="room-name-display">kinjai_main</span>)
-            </button>
+            <div style="display: flex; gap: 8px;">
+                <button class="room-share-btn" onclick="copyRoomShareLink()">
+                    🔗 คัดลอกลิงก์แชร์ทีม (<span id="room-name-display">kinjai_main</span>)
+                </button>
+                <button class="room-share-btn" style="background: rgba(220, 38, 38, 0.2); border-color: #ef4444;" onclick="document.getElementById('debug-console').style.display='block'">
+                    🛠️ ดีบั๊ก
+                </button>
+            </div>
         </div>
     </div>
+    
+    <!-- Collapsible Debug Monitor -->
+    <div id="debug-console" style="position: fixed; bottom: 80px; left: 24px; background: rgba(15, 23, 42, 0.95); border: 2px solid #ef4444; padding: 12px; border-radius: 12px; font-size: 11px; font-family: monospace; width: 300px; z-index: 99999; pointer-events: auto; display: none; box-shadow: 0 10px 25px rgba(0,0,0,0.5);">
+        <div style="font-weight: bold; color: #ef4444; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 4px;">
+            <span>🛠️ DEBUG MONITOR</span>
+            <span style="cursor: pointer; padding: 2px 6px; background: rgba(255,255,255,0.1); border-radius: 4px;" onclick="document.getElementById('debug-console').style.display='none'">[x] ปิด</span>
+        </div>
+        <div id="debug-topic" style="margin-bottom: 4px;">Topic: -</div>
+        <div id="debug-sse" style="margin-bottom: 4px; font-weight: bold;">SSE: Connecting...</div>
+        <div id="debug-sent" style="margin-bottom: 4px;">Last Sent: -</div>
+        <div id="debug-recv" style="margin-bottom: 4px;">Last Recv: -</div>
+        <div id="debug-err" style="color: #f87171; margin-top: 6px; max-height: 80px; overflow-y: auto; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 4px; white-space: pre-wrap;">Errors: None</div>
+    </div>
+
 
     <div class="overlay instructions">
         <div class="instruction-item"><span class="dot"></span>คลิกซ้าย + ลาก เพื่อหมุน</div>
@@ -4457,44 +4471,139 @@
     <script>
 
         // ==========================================
-        // REAL-TIME CLOUD & MULTI-DEVICE SYNC ENGINE
+        // REAL-TIME CLOUD & MULTI-DEVICE SYNC ENGINE (ntfy.sh)
         // ==========================================
 
-        const firebaseConfig = {
-            databaseURL: "https://kinjai-stage-default-rtdb.asia-southeast1.firebasedatabase.app"
-        };
+        const urlParams = new URLSearchParams(window.location.search);
+        const roomId = urlParams.get('room') || 'kinjai_stage_main_v1';
+        const ntfyTopic = 'kinjai_topic_' + roomId.replace(/[^a-zA-Z0-9_]/g, '').toLowerCase();
 
-        let db = null;
-        let roomRef = null;
         let isUserDragging = false;
         let isApplyingRemoteData = false;
-
-        const urlParams = new URLSearchParams(window.location.search);
-        const roomId = urlParams.get('room') || 'kinjai_main';
 
         const roomDisplayEl = document.getElementById('room-name-display');
         if (roomDisplayEl) roomDisplayEl.textContent = roomId;
 
-        try {
-            firebase.initializeApp(firebaseConfig);
-            db = firebase.database();
-            roomRef = db.ref('rooms/' + roomId);
-            initRealtimeSync();
-        } catch (e) {
-            console.warn("Firebase Init fallback to BroadcastChannel / LocalStorage:", e);
-            const statusEl = document.getElementById('sync-status-text');
-            if (statusEl) statusEl.textContent = "🟡 โหมดสแตนด์บาย (Local Realtime Sync)";
-        }
-
-        const broadcastChannel = ('BroadcastChannel' in window) ? new BroadcastChannel('kinjai_sync_' + roomId) : null;
-        if (broadcastChannel) {
-            broadcastChannel.onmessage = (event) => {
-                if (event.data && !isUserDragging) {
-                    applyRemoteLayoutData(event.data);
+        function updateDebugStatus(type, msg) {
+            try {
+                if (type === 'topic') document.getElementById('debug-topic').textContent = 'Topic: ' + msg;
+                if (type === 'sse') document.getElementById('debug-sse').textContent = 'Status: ' + msg;
+                if (type === 'sent') document.getElementById('debug-sent').textContent = 'Last Sent: ' + msg;
+                if (type === 'recv') document.getElementById('debug-recv').textContent = 'Last Recv: ' + msg;
+                if (type === 'error') {
+                    const errEl = document.getElementById('debug-err');
+                    if (errEl) {
+                        if (errEl.textContent === 'Errors: None') errEl.innerHTML = '';
+                        errEl.innerHTML += '<div>⚠️ ' + msg + '</div>';
+                    }
                 }
-            };
+            } catch(e) {}
         }
 
+        window.onerror = function(message, source, lineno, colno, error) {
+            updateDebugStatus('error', message + ' (L' + lineno + ')');
+            return false;
+        };
+
+        function fetchCloudLayoutOnStartup() {
+            fetch('https://ntfy.sh/' + ntfyTopic + '/json?poll=1')
+                .then(res => res.text())
+                .then(text => {
+                    if (!text || text.trim() === '') return;
+                    const lines = text.trim().split('\n');
+                    if (lines.length > 0) {
+                        const lastLine = lines[lines.length - 1];
+                        try {
+                            const parsed = JSON.parse(lastLine);
+                            if (parsed.message) {
+                                const payload = JSON.parse(parsed.message);
+                                applyRemoteLayoutData(payload);
+                                updateDebugStatus('recv', 'Startup Cloud Sync');
+                            }
+                        } catch(e) {
+                            console.warn("Failed parsing initial cloud message:", e);
+                        }
+                    }
+                }).catch(err => {
+                    console.error("Initial cloud load error:", err);
+                    updateDebugStatus('error', 'Startup fetch: ' + err.message);
+                });
+        }
+
+        let sseSource = null;
+        let pollingTimer = null;
+        let isUsingPolling = false;
+
+        function startPollingFallback() {
+            if (isUsingPolling) return;
+            isUsingPolling = true;
+            updateDebugStatus('sse', '⚠️ Polling Fallback Active');
+            
+            pollingTimer = setInterval(() => {
+                if (!isUserDragging) {
+                    fetch('https://ntfy.sh/' + ntfyTopic + '/json?poll=1')
+                        .then(res => res.text())
+                        .then(text => {
+                            if (!text || text.trim() === '') return;
+                            const lines = text.trim().split('\n');
+                            if (lines.length > 0) {
+                                const lastLine = lines[lines.length - 1];
+                                try {
+                                    const parsed = JSON.parse(lastLine);
+                                    if (parsed.message) {
+                                        const payload = JSON.parse(parsed.message);
+                                        applyRemoteLayoutData(payload);
+                                        updateDebugStatus('recv', 'Poll: ' + new Date(parsed.time * 1000).toLocaleTimeString());
+                                    }
+                                } catch(e) {}
+                            }
+                        }).catch(err => {
+                            console.error("Polling error:", err);
+                            updateDebugStatus('error', 'Polling: ' + err.message);
+                        });
+                }
+            }, 3000);
+        }
+
+        function initRealtimeStream() {
+            try {
+                updateDebugStatus('topic', ntfyTopic);
+                sseSource = new EventSource('https://ntfy.sh/' + ntfyTopic + '/sse');
+                
+                sseSource.onopen = () => {
+                    updateDebugStatus('sse', '🟢 Connected (SSE)');
+                    if (pollingTimer) {
+                        clearInterval(pollingTimer);
+                        isUsingPolling = false;
+                    }
+                };
+
+                sseSource.onmessage = (event) => {
+                    try {
+                        const data = JSON.parse(event.data);
+                        if (data.message && !isUserDragging) {
+                            const payload = JSON.parse(data.message);
+                            applyRemoteLayoutData(payload);
+                            updateDebugStatus('recv', new Date(data.time * 1000).toLocaleTimeString());
+                        }
+                    } catch(e) {
+                        updateDebugStatus('error', 'SSE Parse: ' + e.message);
+                    }
+                };
+
+                sseSource.onerror = (e) => {
+                    console.warn("SSE connection failed. Falling back to HTTP polling...", e);
+                    updateDebugStatus('sse', '🔴 Disconnected (Using Polling)');
+                    startPollingFallback();
+                };
+            } catch(e) {
+                console.error("SSE init error, falling back...", e);
+                updateDebugStatus('error', 'SSE Init: ' + e.message);
+                startPollingFallback();
+            }
+        }
+
+        let syncDebounceTimer = null;
         function syncToCloud() {
             if (isApplyingRemoteData) return;
 
@@ -4522,28 +4631,25 @@
                 updatedAt: Date.now()
             };
 
-            // 1. Firebase Realtime DB
-            if (roomRef) {
-                roomRef.set(payload).catch(err => console.error("Cloud Sync Error:", err));
-            }
-
-            // 2. Broadcast Channel for local cross-tab sync
-            if (broadcastChannel) {
-                broadcastChannel.postMessage(payload);
-            }
-
-            // 3. LocalStorage
+            // 1. Save locally
             localStorage.setItem('floorplan3d_saved_layout_' + roomId, JSON.stringify(layoutData));
-        }
 
-        function initRealtimeSync() {
-            if (!roomRef) return;
-            roomRef.on('value', (snapshot) => {
-                const data = snapshot.val();
-                if (data && !isUserDragging) {
-                    applyRemoteLayoutData(data);
-                }
-            });
+            // 2. Publish to Cloud Topic (Debounced 150ms)
+            clearTimeout(syncDebounceTimer);
+            syncDebounceTimer = setTimeout(() => {
+                const nowStr = new Date().toLocaleTimeString();
+                fetch('https://ntfy.sh/' + ntfyTopic, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'text/plain' },
+                    body: JSON.stringify(payload)
+                }).then(() => {
+                    console.log("Cloud sync published at " + nowStr);
+                    updateDebugStatus('sent', nowStr);
+                }).catch(err => {
+                    console.error("Cloud publish error:", err);
+                    updateDebugStatus('error', 'Publish: ' + err.message);
+                });
+            }, 150);
         }
 
         function applyRemoteLayoutData(data) {
@@ -4602,6 +4708,7 @@
                 }
             } catch(e) {
                 console.error("Error applying remote layout:", e);
+                updateDebugStatus('error', 'Apply remote: ' + e.message);
             } finally {
                 isApplyingRemoteData = false;
             }
@@ -4626,6 +4733,12 @@
                 showToast('🔗 ลิงก์ห้อง: ' + shareUrl);
             }
         }
+
+        // Initialize Cloud Listeners when loaded
+        setTimeout(() => {
+            fetchCloudLayoutOnStartup();
+            initRealtimeStream();
+        }, 500);
 
     </script>
 </body>
