@@ -4472,7 +4472,7 @@
     <script>
 
         // ==========================================
-        // REAL-TIME CLOUD & MULTI-DEVICE SYNC ENGINE (WebSocket)
+        // REAL-TIME CLOUD & MULTI-DEVICE SYNC ENGINE (WebSocket + File Attachment Fallback)
         // ==========================================
 
         const urlParams = new URLSearchParams(window.location.search);
@@ -4506,6 +4506,12 @@
             return false;
         };
 
+        function isMovableObject(name) {
+            if (!name) return false;
+            const n = name.toLowerCase();
+            return n.startsWith('item_') || n.startsWith('audience_chairs') || n.startsWith('conference_chairs');
+        }
+
         function fetchCloudLayoutOnStartup() {
             fetch('https://ntfy.sh/' + ntfyTopic + '/json?poll=1')
                 .then(res => res.text())
@@ -4513,19 +4519,33 @@
                     if (!text || text.trim() === '') return;
                     const lines = text.trim().split('\n');
                     
-                    // Loop backwards to find the last message that is a valid layout JSON
+                    // Loop backwards to find the last valid layout JSON or file attachment
                     let foundLayout = false;
                     for (let i = lines.length - 1; i >= 0; i--) {
                         try {
                             const parsed = JSON.parse(lines[i]);
-                            if (parsed.message && parsed.message.startsWith('{')) {
-                                const payload = JSON.parse(parsed.message);
-                                if (payload.layout) {
-                                    applyRemoteLayoutData(payload);
-                                    updateDebugStatus('recv', 'Startup Cloud Sync');
-                                    foundLayout = true;
-                                    break;
+                            if (parsed.message) {
+                                if (parsed.message.startsWith('{')) {
+                                    const payload = JSON.parse(parsed.message);
+                                    if (payload.layout) {
+                                        applyRemoteLayoutData(payload);
+                                        updateDebugStatus('recv', 'Startup Cloud Sync');
+                                        foundLayout = true;
+                                        break;
+                                    }
                                 }
+                            }
+                            if (parsed.attachment && parsed.attachment.url) {
+                                fetch(parsed.attachment.url)
+                                    .then(res => res.json())
+                                    .then(payload => {
+                                        if (payload.layout) {
+                                            applyRemoteLayoutData(payload);
+                                            updateDebugStatus('recv', 'Startup File Sync');
+                                        }
+                                    }).catch(err => console.error("Startup attachment fetch error:", err));
+                                foundLayout = true;
+                                break;
                             }
                         } catch(e) {}
                     }
@@ -4563,17 +4583,26 @@
                 ws.onmessage = (event) => {
                     try {
                         const data = JSON.parse(event.data);
-                        // Filter messages that contain stringified layout JSON only
-                        if (data.event === 'message' && data.message && data.message.startsWith('{')) {
-                            const payload = JSON.parse(data.message);
-                            if (payload.layout) {
-                                applyRemoteLayoutData(payload);
-                                updateDebugStatus('recv', new Date(data.time * 1000).toLocaleTimeString());
+                        if (data.event === 'message') {
+                            if (data.message && data.message.startsWith('{')) {
+                                const payload = JSON.parse(data.message);
+                                if (payload.layout) {
+                                    applyRemoteLayoutData(payload);
+                                    updateDebugStatus('recv', new Date(data.time * 1000).toLocaleTimeString());
+                                }
+                            } else if (data.attachment && data.attachment.url) {
+                                fetch(data.attachment.url)
+                                    .then(res => res.json())
+                                    .then(payload => {
+                                        if (payload.layout && !isUserDragging) {
+                                            applyRemoteLayoutData(payload);
+                                            updateDebugStatus('recv', 'File: ' + new Date(data.time * 1000).toLocaleTimeString());
+                                        }
+                                    }).catch(err => console.error("WS attachment fetch error:", err));
                             }
                         }
                     } catch(e) {
-                        // Only log actual parsing errors of messages intended for layout
-                        if (event.data.includes('layout')) {
+                        if (event.data.includes('layout') || event.data.includes('attachment')) {
                             updateDebugStatus('error', 'WS Parse: ' + e.message);
                         }
                     }
@@ -4602,12 +4631,23 @@
             const layoutData = {};
             selectableObjects.forEach(obj => {
                 if (obj.name) {
+                    const isMovable = isMovableObject(obj.name);
                     layoutData[obj.name] = {
-                        pos: { x: obj.position.x, y: obj.position.y, z: obj.position.z },
-                        rot: { x: obj.rotation.x, y: obj.rotation.y, z: obj.rotation.z },
                         visible: obj.visible,
                         color: (obj.material && obj.material.color) ? '#' + obj.material.color.getHexString() : null
                     };
+                    if (isMovable) {
+                        layoutData[obj.name].pos = { 
+                            x: Math.round(obj.position.x * 100) / 100, 
+                            y: Math.round(obj.position.y * 100) / 100, 
+                            z: Math.round(obj.position.z * 100) / 100 
+                        };
+                        layoutData[obj.name].rot = { 
+                            x: Math.round(obj.rotation.x * 100) / 100, 
+                            y: Math.round(obj.rotation.y * 100) / 100, 
+                            z: Math.round(obj.rotation.z * 100) / 100 
+                        };
+                    }
                 }
             });
 
@@ -4706,6 +4746,7 @@
             }
         }
 
+        // Setup share link copy and menu toggling
         function toggleMobilePanel() {
             const panel = document.querySelector('.panel');
             if (panel) {
