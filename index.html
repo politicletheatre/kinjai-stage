@@ -4512,18 +4512,25 @@
                 .then(text => {
                     if (!text || text.trim() === '') return;
                     const lines = text.trim().split('\n');
-                    if (lines.length > 0) {
-                        const lastLine = lines[lines.length - 1];
+                    
+                    // Loop backwards to find the last message that is a valid layout JSON
+                    let foundLayout = false;
+                    for (let i = lines.length - 1; i >= 0; i--) {
                         try {
-                            const parsed = JSON.parse(lastLine);
-                            if (parsed.message) {
+                            const parsed = JSON.parse(lines[i]);
+                            if (parsed.message && parsed.message.startsWith('{')) {
                                 const payload = JSON.parse(parsed.message);
-                                applyRemoteLayoutData(payload);
-                                updateDebugStatus('recv', 'Startup Cloud Sync');
+                                if (payload.layout) {
+                                    applyRemoteLayoutData(payload);
+                                    updateDebugStatus('recv', 'Startup Cloud Sync');
+                                    foundLayout = true;
+                                    break;
+                                }
                             }
-                        } catch(e) {
-                            console.warn("Failed parsing initial cloud message:", e);
-                        }
+                        } catch(e) {}
+                    }
+                    if (!foundLayout) {
+                        console.log("No valid layout found in topic history.");
                     }
                 }).catch(err => {
                     console.error("Initial cloud load error:", err);
@@ -4556,13 +4563,19 @@
                 ws.onmessage = (event) => {
                     try {
                         const data = JSON.parse(event.data);
-                        if (data.event === 'message' && data.message && !isUserDragging) {
+                        // Filter messages that contain stringified layout JSON only
+                        if (data.event === 'message' && data.message && data.message.startsWith('{')) {
                             const payload = JSON.parse(data.message);
-                            applyRemoteLayoutData(payload);
-                            updateDebugStatus('recv', new Date(data.time * 1000).toLocaleTimeString());
+                            if (payload.layout) {
+                                applyRemoteLayoutData(payload);
+                                updateDebugStatus('recv', new Date(data.time * 1000).toLocaleTimeString());
+                            }
                         }
                     } catch(e) {
-                        updateDebugStatus('error', 'WS Parse: ' + e.message);
+                        // Only log actual parsing errors of messages intended for layout
+                        if (event.data.includes('layout')) {
+                            updateDebugStatus('error', 'WS Parse: ' + e.message);
+                        }
                     }
                 };
 
